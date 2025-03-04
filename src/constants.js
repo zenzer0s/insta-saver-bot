@@ -28,10 +28,9 @@ const SUCCESS_MESSAGE = {
     PHOTO_URL: "Photo url sent successfully ✅",
 };
 
-const MESSSAGE = {
+const MESSAGE = {
     HELLO: "Hello from InstaSaver Bot!",
-    WELCOME:
-        "Hi firstName, 👋\nWelcome to Insta Saver Bot! \n\nTo get started, send me the link of Instagram post, Reels, IGTV, etc. to download the video. \n\nHappy downloading!",
+    WELCOME: "Welcome to Insta Saver Bot, firstName!",
     GATHERING_CONTENT: "Gathering content 🔍",
     INITIATING_UPLOAD: "Initiating upload 🚀",
     DOWNLOADING: "➡️  Downloading post for: requestUrl 📥",
@@ -44,7 +43,7 @@ const MESSSAGE = {
 const REQUEST_STATUS = {
     PENDING: "PENDING",
     PROCESSING: "PROCESSING",
-    DONE: "DONE",
+    COMPLETED: "COMPLETED",
     FAILED: "FAILED",
 };
 
@@ -61,7 +60,7 @@ module.exports = {
     ERROR_TYPE,
     ACTION,
     SUCCESS_MESSAGE,
-    MESSSAGE,
+    MESSAGE,
     REQUEST_STATUS,
     MEDIA_TYPE,
     INSTAGRAM_API_URL,
