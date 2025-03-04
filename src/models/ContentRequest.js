@@ -1,6 +1,9 @@
 const { DataTypes } = require('sequelize');
 const { sequelize } = require('../config/database');
 const { REQUEST_STATUS } = require('../constants');
+const { addOrUpdate, remove, readJSON } = require('../config/jsonDatabase');
+
+const FILENAME = 'contentRequests';
 
 const ContentRequest = sequelize.define('ContentRequest', {
   chatId: {
@@ -41,4 +44,45 @@ const ContentRequest = sequelize.define('ContentRequest', {
   timestamps: false
 });
 
-module.exports = ContentRequest;
+const create = async (data) => {
+  addOrUpdate(FILENAME, data, 'id');
+};
+
+const update = async (data, where) => {
+  const items = readJSON(FILENAME);
+  const item = items.find((i) => i.id === where.id);
+  if (item) {
+    Object.assign(item, data);
+    addOrUpdate(FILENAME, item, 'id');
+  }
+};
+
+const destroy = async (where) => {
+  remove(FILENAME, 'id', where.id);
+};
+
+const findOrCreate = async ({ where, defaults }) => {
+  const items = readJSON(FILENAME);
+  let item = items.find((i) => i.id === where.id);
+  if (!item) {
+    item = { ...defaults, id: where.id };
+    addOrUpdate(FILENAME, item, 'id');
+    return [item, true];
+  }
+  return [item, false];
+};
+
+const findAll = async (where) => {
+  const items = readJSON(FILENAME);
+  return items.filter((item) => {
+    return Object.keys(where).every((key) => item[key] === where[key]);
+  });
+};
+
+module.exports = {
+  create,
+  update,
+  destroy,
+  findOrCreate,
+  findAll,
+};
