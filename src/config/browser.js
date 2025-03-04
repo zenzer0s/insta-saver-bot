@@ -1,148 +1,86 @@
 const puppeteer = require("puppeteer");
-const fs = require("fs");
-const path = require("path");
 const { log } = require("../utils");
 
-const userDataDir = path.join(__dirname, "puppeteer_data");
-const cookiesFilePath = path.join(__dirname, "cookies.json");
+// Create a singleton class for puppeteer browser
+class BrowserManager {
+  constructor() {
+    this.browser = null;
+  }
 
-class Browser {
-    static browserInstance = null;
-
-    static async Open() {
-        if (!this.browserInstance) {
-            try {
-                const launchOptions = {
-                    headless: true,
-                    defaultViewport: { width: 1280, height: 800 },
-                    args: [
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                    ],
-                    // userDataDir,
-                };
-
-                this.browserInstance = await puppeteer.launch(launchOptions);
-                log("Browser launched successfully");
-
-                // Check authentication status on launch
-                // await this.CheckAuth();
-            } catch (error) {
-                log("Error launching browser:", error);
-            }
-        }
+  async Open() {
+    if (this.browser) {
+      return this.browser;
     }
 
-    static async Close() {
-        if (this.browserInstance) {
-            await this.browserInstance.close();
-            this.browserInstance = null;
-            log("Browser closed successfully");
-        }
+    try {
+      const options = {
+        headless: "new", // Use the new headless mode
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-dev-shm-usage",
+          "--disable-accelerated-2d-canvas",
+          "--no-first-run",
+          "--no-zygote",
+          "--disable-gpu",
+          // Additional arguments for stability
+          "--disable-extensions",
+          "--disable-features=IsolateOrigins",
+          "--disable-site-isolation-trials",
+          "--disable-web-security", // Be cautious with this in production
+        ],
+        // Increase timeout
+        timeout: 60000,
+      };
+
+      if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        options.executablePath = process.env.PUPPETEER_EXECUTABLE_PATH;
+      }
+
+      this.browser = await puppeteer.launch(options);
+      log("Browser launched successfully");
+      return this.browser;
+    } catch (error) {
+      log("Error launching browser:", error);
+      throw error;
     }
+  }
 
-    static async getPage() {
-        if (!this.browserInstance) {
-            log("Browser instance not found, reopening...");
-            await this.Open();
-        }
-
-        log("Creating a new page");
-        const page = await this.browserInstance.newPage();
-        return page;
+  async Close() {
+    if (this.browser) {
+      await this.browser.close();
+      this.browser = null;
+      log("Browser closed successfully");
     }
+  }
 
-    static async releasePage(page) {
-        try {
-            await page.close();
-            log("Page Closed / Released successfully");
-        } catch (error) {
-            log("Error releasing page:", error);
-        }
+  // Method to get the browser instance
+  getInstance() {
+    return this.browser;
+  }
+  
+  // Method to create a new page with standard settings
+  async createPage() {
+    if (!this.browser) {
+      await this.Open();
     }
-
-    static async Login(page) {
-        try {
-            log("Tring to log in ...");
-            // Navigate to Instagram login page
-            await page.goto("https://www.instagram.com/accounts/login/", {
-                waitUntil: "networkidle2",
-            });
-
-            // Increase default navigation timeout
-            await page.setDefaultNavigationTimeout(60000); // 60 seconds
-
-            // Enter username and password and click login button
-            await page.type('[name="username"]', process.env.INSTA_USERNAME);
-            await page.type('[name="password"]', process.env.INSTA_PASSWORD);
-            await page.click('[type="submit"]');
-
-            // Wait for navigation to complete after login
-            await page.waitForNavigation({ waitUntil: "networkidle2" });
-
-            log("Logged in successfully");
-
-            await this.CheckAuth();
-
-            // Save cookies after successful login
-            const cookies = await page.cookies();
-            await fs.promises.writeFile(
-                cookiesFilePath,
-                JSON.stringify(cookies, null, 2)
-            );
-            log("Cookies saved");
-        } catch (error) {
-            log("Failed to login bot account:", error);
-        }
-    }
-
-    static async CheckAuth() {
-        log("Checking auth status");
-        const page = await this.browserInstance.newPage();
-        try {
-            await this.restoreCookies(page); // Restore cookies
-
-            // Navigate to a protected page to check if authenticated
-            await page.goto("https://www.instagram.com/accounts/login/", {
-                waitUntil: "networkidle2",
-            });
-
-            // Check if redirected to Instagram home page after login
-            const redirected = page.url() === "https://www.instagram.com/";
-
-            await page.setViewport({ width: 1280, height: 800 });
-
-            if (redirected) {
-                this.authStatus = true;
-                log("Authentication status: Authenticated");
-            } else {
-                // Not authenticated
-                this.authStatus = false;
-                log("Authentication status: Not Authenticated");
-                await this.Login(page); // Perform login if not authenticated
-            }
-        } catch (error) {
-            log("Error checking authentication:", error);
-        } finally {
-            if (page) {
-                await Browser.releasePage(page);
-                log("Page closed/released");
-            }
-        }
-    }
-
-    static async restoreCookies(page) {
-        if (fs.existsSync(cookiesFilePath)) {
-            const cookies = JSON.parse(
-                await fs.promises.readFile(cookiesFilePath, "utf8")
-            );
-            if (cookies.length !== 0) {
-                await page.setCookie(...cookies);
-                log("Cookies restored");
-            }
-        }
-    }
+    
+    const page = await this.browser.newPage();
+    
+    // Set common page settings
+    await page.setViewport({ width: 1280, height: 1024 });
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
+    
+    // Set additional headers to appear more like a real browser
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+    });
+    
+    return page;
+  }
 }
 
-module.exports = Browser;
+// Export a singleton instance
+module.exports = new BrowserManager();
