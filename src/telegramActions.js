@@ -56,28 +56,20 @@ const deleteMessages = async (context) => {
     });
 };
 
-// Send a message to a chat
-const sendMessage = async (context) => {
-    const { chatId, messageId, requestedBy, requestUrl, message } = context;
+/**
+ * Send a simple text message to a chat
+ * @param {Object} params - Message parameters
+ * @param {String} params.chatId - The ID of the chat to send the message to
+ * @param {Object} params.requestedBy - Information about the requester
+ * @param {String} params.message - The message to send
+ */
+const sendMessage = async ({ chatId, requestedBy, message }) => {
     try {
-        let res = await Bot.sendMessage(chatId, message);
-        return res;
+        const { userName, firstName } = requestedBy;
+        log(`Sending message to ${firstName || userName || chatId}`);
+        await Bot.sendMessage(chatId, message, { parse_mode: "HTML" });
     } catch (error) {
-        let errorObj = {
-            action: ACTION.SEND_MESSAGE,
-            errorCode: error?.response?.body?.error_code,
-            errorDescription: error?.response?.body?.description,
-            requestedBy,
-            chatId,
-            requestUrl,
-        };
-        // Handle rate limit errors separately
-        if (error?.response?.body?.error_code === 429) {
-            logError({ ...errorObj, type: ERROR_TYPE.RATE_LIMIT });
-            await Bot.sendMessage(chatId, MESSSAGE.COOL_DOWN);
-        } else {
-            logError({ ...errorObj, type: ERROR_TYPE.FAILED });
-        }
+        log("Error sending message:", error);
     }
 };
 
