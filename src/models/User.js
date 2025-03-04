@@ -1,11 +1,29 @@
-const mongoose = require("mongoose");
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../config/database');
 
-const UserSchema = new mongoose.Schema({
-    chatId: { type: String, unique: true, required: true },
-    userName: { type: String },
-    firstName: { type: String },
-    requestCount: { type: Number, default: 0 },
-    lastUpdated: { type: Date, default: Date.now },
+const User = sequelize.define('User', {
+  chatId: {
+    type: DataTypes.STRING,
+    primaryKey: true,
+    allowNull: false
+  },
+  userName: {
+    type: DataTypes.STRING
+  },
+  firstName: {
+    type: DataTypes.STRING
+  },
+  requestCount: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  lastUpdated: {
+    type: DataTypes.DATE,
+    defaultValue: DataTypes.NOW
+  }
+}, {
+  tableName: 'users',
+  timestamps: false
 });
 
-module.exports = mongoose.model("User", UserSchema);
+module.exports = User;

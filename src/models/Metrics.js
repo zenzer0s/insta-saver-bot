@@ -1,19 +1,34 @@
-const mongoose = require("mongoose");
+const { DataTypes } = require('sequelize');
+const { sequelize } = require('../config/database');
 
-const metricsSchema = new mongoose.Schema(
-    {
-        _id: { type: String, required: true },
-        totalRequests: { type: Number, default: 0 },
-        mediaProcessed: {
-            GraphVideo: { type: Number, default: 0 },
-            GraphImage: { type: Number, default: 0 },
-            GraphSidecar: { type: Number, default: 0 },
-        },
-        lastUpdated: { type: Date, default: Date.now },
-    },
-    { versionKey: false, collection: "metrics" }
-);
-
-const Metrics = mongoose.model("Metrics", metricsSchema);
+const Metrics = sequelize.define('Metrics', {
+  id: {
+    type: DataTypes.STRING,
+    primaryKey: true
+  },
+  totalRequests: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  mediaProcessed_GraphVideo: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  mediaProcessed_GraphImage: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  mediaProcessed_GraphSidecar: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0
+  },
+  lastUpdated: {
+    type: DataTypes.DATE,
+    defaultValue: DataTypes.NOW
+  }
+}, {
+  tableName: 'metrics',
+  timestamps: false
+});
 
 module.exports = Metrics;
