@@ -1,208 +1,193 @@
-const { Queue, Worker, QueueEvents } = require("bullmq");
 const { REQUEST_STATUS } = require("./constants");
 const ContentRequest = require("./models/ContentRequest");
 const { log, waitFor } = require("./utils");
 const { sendRequestedData } = require("./telegramActions");
 const { scrapWithFastDl } = require("./apis");
 const Metrics = require("./models/Metrics");
+const { Op } = require("sequelize");
 
-// Initialize BullMQ queue
-const requestQueue = new Queue("contentRequestQueue", {
-    connection: {
-        host: "localhost",
-        port: 6379,
-    },
-});
+// In-memory queue implementation
+class SimpleQueue {
+  constructor() {
+    this.jobs = [];
+    this.processing = false;
+    this.concurrency = 5;
+    this.activeJobs = 0;
+  }
 
-// Function to clear the queue
-const clearQueue = async () => {
+  async add(job) {
+    this.jobs.push(job);
+    log(`Job added to queue: ${job.id}`);
+    this.processQueue();
+  }
+
+  async processQueue() {
+    if (this.processing) return;
+    
+    this.processing = true;
+    
     try {
-        log("Clearing existing jobs in the queue...");
-        await requestQueue.drain(); // Empties waiting and active jobs
-        await requestQueue.clean(0, "completed"); // Removes completed jobs
-        await requestQueue.clean(0, "failed"); // Removes failed jobs
-        log("Queue cleared.");
+      while (this.jobs.length > 0 && this.activeJobs < this.concurrency) {
+        const job = this.jobs.shift();
+        this.activeJobs++;
+        
+        // Process the job asynchronously
+        this.processJob(job).finally(() => {
+          this.activeJobs--;
+          if (this.activeJobs === 0 && this.jobs.length === 0) {
+            this.processing = false;
+          }
+        });
+      }
     } catch (error) {
-        log("Error clearing queue:", error);
+      log("Error processing queue:", error);
+    } finally {
+      if (this.jobs.length === 0 && this.activeJobs === 0) {
+        this.processing = false;
+      }
     }
-};
+  }
 
-// Process the queue using a Worker
-const requestWorker = new Worker(
-    "contentRequestQueue",
-    async (job) => {
-        const { id, requestUrl, retryCount } = job.data;
+  async processJob(jobData) {
+    const { id, requestUrl, retryCount } = jobData;
 
-        log(`Processing job: ${id}`);
+    log(`Processing job: ${id}`);
 
-        // Mark the job as PROCESSING in the database
-        await ContentRequest.findByIdAndUpdate(id, {
-            status: REQUEST_STATUS.PROCESSING,
-            updatedAt: new Date(),
+    // Mark the job as PROCESSING in the database
+    await ContentRequest.update(
+      { 
+        status: REQUEST_STATUS.PROCESSING,
+        updatedAt: new Date()
+      },
+      { 
+        where: { id: id }
+      }
+    );
+
+    try {
+      const result = await scrapWithFastDl(requestUrl);
+
+      if (!result.success) {
+        const newRetryCount = retryCount + 1;
+
+        if (newRetryCount <= 5) {
+          await ContentRequest.update(
+            {
+              status: REQUEST_STATUS.PENDING,
+              updatedAt: new Date(),
+              retryCount: newRetryCount
+            },
+            { where: { id: id } }
+          );
+        } else {
+          await ContentRequest.destroy({ where: { id: id } });
+          log(`Request document deleted: ${id}`);
+        }
+
+        log(`Job ${id} failed. Retry count: ${newRetryCount}`);
+        log("Scraping failed");
+      } else {
+        await waitFor(500);
+
+        // Send requested data
+        await sendRequestedData({ ...result.data, ...jobData });
+
+        // Delete document after successful processing
+        await ContentRequest.destroy({ where: { id: id } });
+        log(`Request document deleted: ${id}`);
+
+        // Find or create metrics record
+        const [metrics, created] = await Metrics.findOrCreate({
+          where: { id: '1' },
+          defaults: {
+            id: '1',
+            totalRequests: 1,
+            [`mediaProcessed_${result.data?.mediaType}`]: 1,
+            lastUpdated: new Date()
+          }
         });
 
-        try {
-            const result = await scrapWithFastDl(requestUrl);
-
-            if (!result.success) {
-                const newRetryCount = retryCount + 1;
-
-                if (newRetryCount <= 5) {
-                    await ContentRequest.findByIdAndUpdate(id, {
-                        $set: {
-                            updatedAt: new Date(),
-                            status: REQUEST_STATUS.PENDING,
-                        },
-                        $inc: { retryCount: 1 },
-                    });
-                } else {
-                    await ContentRequest.findByIdAndDelete(id);
-                    log(`Request document deleted: ${id}`);
-                }
-
-                log(`Job ${id} failed. Retry count: ${newRetryCount}`);
-                log("Scraping failed");
-            } else {
-                await waitFor(500);
-
-                // Send requested data
-                await sendRequestedData({ ...result.data, ...job.data });
-
-                // Delete document after successful processing
-                await ContentRequest.findByIdAndDelete(id);
-                log(`Request document deleted: ${id}`);
-
-                await Metrics.findOneAndUpdate(
-                    {},
-                    {
-                        $inc: {
-                            totalRequests: 1,
-                            [`mediaProcessed.${result.data?.mediaType}`]: 1,
-                        },
-                        $set: { lastUpdated: new Date() },
-                    },
-                    { upsert: true, new: true }
-                );
-            }
-        } catch (error) {
-            log(`Error processing job ${id}:`, error);
-
-            const newRetryCount = retryCount + 1;
-
-
-            if (newRetryCount <= 5) {
-                await ContentRequest.findByIdAndUpdate(id, {
-                    $set: {
-                        updatedAt: new Date(),
-                        status: REQUEST_STATUS.PENDING,
-                    },
-                    $inc: { retryCount: 1 },
-                });
-            } else {
-                await ContentRequest.findByIdAndDelete(id);
-                log(`Request document deleted: ${id}`);
-            }
-
-            log(
-                `Updated request ${id} for retry. Retry count: ${newRetryCount}`
-            );
+        if (!created) {
+          await metrics.increment('totalRequests');
+          await metrics.increment(`mediaProcessed_${result.data?.mediaType}`);
+          metrics.lastUpdated = new Date();
+          await metrics.save();
         }
-    },
-    {
-        connection: {
-            host: "localhost",
-            port: 6379,
-        },
-        concurrency: 5,
-    }
-);
+        
+        log(`Job ${id} completed successfully.`);
+      }
+    } catch (error) {
+      log(`Error processing job ${id}:`, error);
 
-// Log job events using QueueEvents
-const queueEvents = new QueueEvents("contentRequestQueue", {
-    connection: {
-        host: "localhost",
-        port: 6379,
-    },
-});
+      const newRetryCount = retryCount + 1;
 
-queueEvents.on("completed", ({ jobId }) => {
-    log(`Job ${jobId} completed successfully.`);
-});
-
-queueEvents.on("failed", ({ jobId, failedReason }) => {
-    log(`Job ${jobId} failed: ${failedReason}`);
-});
-
-// Fetch pending requests from MongoDB and add them to the queue
-const fetchPendingRequests = async () => {
-    try {
-        const existingJobs = await requestQueue.getJobs([
-            "waiting",
-            "delayed",
-            "active",
-        ]);
-        const existingJobIds = new Set(existingJobs.map((job) => job.data.id));
-
-        const pendingRequests = await ContentRequest.find({
+      if (newRetryCount <= 5) {
+        await ContentRequest.update(
+          {
             status: REQUEST_STATUS.PENDING,
-            retryCount: { $lt: 5 },
-        }).sort({ requestedAt: 1 });
+            updatedAt: new Date(),
+            retryCount: newRetryCount
+          },
+          { where: { id: id } }
+        );
+      } else {
+        await ContentRequest.destroy({ where: { id: id } });
+        log(`Request document deleted: ${id}`);
+      }
 
-        log(`Fetched ${pendingRequests.length} pending requests from DB.`);
-        for (const request of pendingRequests) {
-            if (!existingJobIds.has(request._id.toString())) {
-                await requestQueue.add("contentRequest", {
-                    id: request._id.toString(),
-                    messageId: request.messageId,
-                    shortCode: request.shortCode,
-                    requestUrl: request.requestUrl,
-                    requestedBy: request.requestedBy,
-                    retryCount: request.retryCount,
-                    chatId: request.chatId,
-                });
-            }
-        }
-    } catch (error) {
-        log("Error fetching pending requests:", error);
+      log(`Updated request ${id} for retry. Retry count: ${newRetryCount}`);
     }
+  }
+}
+
+const requestQueue = new SimpleQueue();
+
+// Fetch pending requests from SQLite and add them to the queue
+const fetchPendingRequests = async () => {
+  try {
+    const pendingRequests = await ContentRequest.findAll({
+      where: {
+        status: REQUEST_STATUS.PENDING,
+        retryCount: { [Op.lt]: 5 }
+      },
+      order: [['requestedAt', 'ASC']]
+    });
+
+    log(`Fetched ${pendingRequests.length} pending requests from DB.`);
+    
+    for (const request of pendingRequests) {
+      // Check if the job is already in the queue
+      const jobData = {
+        id: request.id.toString(),
+        messageId: request.messageId,
+        shortCode: request.shortCode,
+        requestUrl: request.requestUrl,
+        requestedBy: {
+          userName: request.requestedBy_userName,
+          firstName: request.requestedBy_firstName
+        },
+        retryCount: request.retryCount,
+        chatId: request.chatId,
+      };
+      
+      await requestQueue.add(jobData);
+    }
+  } catch (error) {
+    log("Error fetching pending requests:", error);
+  }
 };
 
-// Initialize the queue and MongoDB change stream
+// Initialize the queue
 const initQueue = async () => {
-    try {
-        await clearQueue(); // Clear the queue on start
-        await fetchPendingRequests(); // Load pending requests
-        log("Queue initialized with pending requests.");
+  try {
+    await fetchPendingRequests(); // Load pending requests
+    log("Queue initialized with pending requests.");
 
-        const changeStream = ContentRequest.watch();
-        changeStream.on("change", async (change) => {
-            if (change.operationType === "insert") {
-                const newRequest = change.fullDocument;
-                log("New request detected:", newRequest._id);
-
-                await requestQueue.add("contentRequest", {
-                    id: newRequest._id.toString(),
-                    messageId: newRequest.messageId,
-                    shortCode: newRequest.shortCode,
-                    requestUrl: newRequest.requestUrl,
-                    requestedBy: newRequest.requestedBy,
-                    retryCount: newRequest.retryCount,
-                    chatId: newRequest.chatId,
-                });
-            }
-        });
-
-        setInterval(fetchPendingRequests, 60000); // Periodic sync every 60 seconds
-
-        // Periodically clean completed/failed jobs
-        setInterval(async () => {
-            await requestQueue.clean(3600 * 1000, "completed"); // Clean jobs older than 1 hour
-            await requestQueue.clean(3600 * 1000, "failed"); // Clean failed jobs older than 1 hour
-            log("Cleaned up old jobs from the queue.");
-        }, 60000); // Every minute
-    } catch (error) {
-        log("Error initializing queue:", error);
-    }
+    // Use polling to check for new requests periodically
+    setInterval(fetchPendingRequests, 5000); // Check for new requests every 5 seconds
+  } catch (error) {
+    log("Error initializing queue:", error);
+  }
 };
 
-module.exports = { initQueue };
+module.exports = { initQueue, requestQueue };
