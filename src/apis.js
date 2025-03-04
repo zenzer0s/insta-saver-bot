@@ -1,243 +1,215 @@
-const axios = require("axios");
-const {
-    findMediaByShortCode,
-    cleanTimelineResponse,
-    waitFor,
-    log,
-} = require("./utils");
-const { INSTAGRAM_API_URL, MEDIA_TYPE } = require("./constants");
-const { exec } = require("child_process");
+const puppeteer = require("puppeteer");
 const { Browser } = require("./config");
+const { log } = require("./utils");
 
-const fetchOwnerId = async (shortCode) => {
-    try {
-        const response = await axios.get(
-            `${INSTAGRAM_API_URL}/?doc_id=17867389474812335&variables={"include_logged_out":true,"include_reel":false,"shortcode":"${shortCode}"}`
-        );
-        const ownerId = response?.data?.data?.shortcode_media?.owner?.id;
+const scrapWithBrowser = async (url) => {
+  const browser = Browser.getInstance();
+  let page = null;
 
-        if (ownerId) {
-            return { success: true, data: ownerId };
+  try {
+    log("Creating a new page for direct Instagram scraping");
+    page = await browser.newPage();
+
+    // Attempt to bypass Instagram restrictions
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    });
+
+    log("Navigating to Instagram URL");
+    await page.goto(url, {
+      waitUntil: 'networkidle2',
+      timeout: 60000
+    });
+
+    // Check if we're on a login page, which means we're being blocked
+    const isLoginPage = await page.evaluate(() => {
+      return document.querySelector('form') !== null && 
+             document.querySelector('input[name="username"]') !== null;
+    });
+
+    if (isLoginPage) {
+      log("Instagram is showing login page - direct scraping blocked");
+      return { success: false };
+    }
+
+    // Take a screenshot for debugging (optional)
+    await page.screenshot({ path: 'instagram-debug.png' });
+
+    // Wait for content to load
+    await page.waitForSelector('img', { timeout: 10000 }).catch(() => {
+      log("No images found on the page");
+    });
+
+    // Try to extract what we can directly from Instagram
+    const data = await page.evaluate(async () => {
+      const extractedData = {
+        videoSrc: null,
+        images: [],
+        caption: '',
+        username: '',
+        profilePic: ''
+      };
+
+      // Look for video - multiple selector patterns
+      const videoSelectors = [
+        'video',
+        'video source',
+        '[data-testid="videoElement"]',
+        'article video'
+      ];
+
+      for (const selector of videoSelectors) {
+        const elem = document.querySelector(selector);
+        if (elem && elem.src) {
+          extractedData.videoSrc = elem.src;
+          break;
         }
-    } catch (error) {
-        log("Error fetching owner ID:", error);
+      }
+
+      // Look for images - collect all that are not tiny icons
+      const allImages = Array.from(document.querySelectorAll('img'));
+      extractedData.images = allImages
+        .filter(img => {
+          // Filter out small images like icons
+          const rect = img.getBoundingClientRect();
+          return img.src && 
+                 !img.src.includes('profile_pic') && 
+                 rect.width > 100 && 
+                 rect.height > 100;
+        })
+        .map(img => img.src);
+
+      // Look for caption - try multiple common selectors
+      const captionSelectors = [
+        'article h1', 
+        '[data-testid="post-caption"]',
+        'article div > span',
+        '.caption',
+        'article div > div > span',
+      ];
+
+      for (const selector of captionSelectors) {
+        const elem = document.querySelector(selector);
+        if (elem && elem.textContent) {
+          extractedData.caption = elem.textContent.trim();
+          break;
+        }
+      }
+
+      // Get username - try multiple selectors
+      const usernameSelectors = [
+        'header h2',
+        '[data-testid="user-avatar"]',
+        'header a',
+        'header span'
+      ];
+
+      for (const selector of usernameSelectors) {
+        const elem = document.querySelector(selector);
+        if (elem) {
+          // Extract username from element text or href
+          extractedData.username = elem.textContent ? elem.textContent.trim() : '';
+          if (!extractedData.username && elem.href) {
+            const parts = elem.href.split('/').filter(Boolean);
+            extractedData.username = parts[parts.length - 1];
+          }
+          if (extractedData.username) break;
+        }
+      }
+
+      // Get profile picture
+      const profilePicElem = document.querySelector('header img');
+      if (profilePicElem && profilePicElem.src) {
+        extractedData.profilePic = profilePicElem.src;
+      }
+
+      // Fetch the video content if it's a blob URL
+      if (extractedData.videoSrc && extractedData.videoSrc.startsWith('blob:')) {
+        const response = await fetch(extractedData.videoSrc);
+        const arrayBuffer = await response.arrayBuffer();
+        extractedData.videoBuffer = Array.from(new Uint8Array(arrayBuffer)); // Convert to a plain array
+      }
+
+      return extractedData;
+    });
+
+    // Log what we found for debugging
+    log("Data extracted from Instagram page:");
+    log(`- Video found: ${data.videoSrc ? 'Yes' : 'No'}`);
+    log(`- Images found: ${data.images.length}`);
+    log(`- Caption length: ${data.caption.length}`);
+    log(`- Username found: ${data.username ? data.username : 'No'}`);
+
+    // Check if we found any media
+    if (!data.videoSrc && data.images.length === 0) {
+      log("No media found on Instagram page");
+      return { success: false };
     }
 
-    return { success: false };
-};
+    // Format the result
+    const result = {
+      captionText: data.caption || '',
+      mediaType: data.videoSrc ? 'GraphVideo' : 'GraphImage',
+      mediaUrl: data.videoSrc || (data.images.length > 0 ? data.images[0] : ''),
+      displayUrl: data.images.length > 0 ? data.images[0] : '',
+      owner_userName: data.username || '',
+      owner_fullName: data.username || '',
+      owner_avatarUrl: data.profilePic || '',
+      mediaList: null,
+      mediaBuffer: data.videoBuffer ? Buffer.from(data.videoBuffer) : null // Convert back to Buffer
+    };
 
-const fetchTimelineData = async (ownerId, after = null) => {
-    try {
-        let url = `${INSTAGRAM_API_URL}/?doc_id=17991233890457762&variables={"id":"${ownerId}","first":50,"after":${
-            after ? `"${after}"` : null
-        }}`;
-        const response = await axios.get(url);
-        return { success: true, data: response.data };
-    } catch (error) {
-        log("Error fetching timeline data:", error?.response?.data);
+    if (data.images.length > 1) {
+      result.mediaType = 'GraphSidecar';
+      result.mediaList = data.images.map(img => ({
+        url: img,
+        thumbnail: img
+      }));
     }
+
+    // Log caption if found
+    if (result.captionText) {
+      log(`Caption extracted - Length: ${result.captionText.length} chars`);
+      log(`Caption preview: ${result.captionText.substring(0, 100)}...`);
+    }
+
     return {
-        success: false,
-        message: "Error fetching timeline data. Please try again later.",
+      success: true,
+      data: result
     };
-};
-
-const getStreamDataRecursively = async (shortCode, ownerId, after = null) => {
-    const timelineResponse = await fetchTimelineData(ownerId, after);
-    if (!timelineResponse.success) {
-        return null;
-    }
-
-    const streamList =
-        timelineResponse.data?.data?.user?.edge_owner_to_timeline_media
-            ?.edges || [];
-    const pageInfo =
-        timelineResponse.data?.data?.user?.edge_owner_to_timeline_media
-            ?.page_info;
-
-    const mediaList = cleanTimelineResponse(streamList);
-    const media = findMediaByShortCode(mediaList, shortCode);
-
-    if (media) {
-        return { data: media, success: true };
-    }
-
-    if (pageInfo?.has_next_page) {
-        await waitFor(500);
-        return getStreamDataRecursively(
-            shortCode,
-            ownerId,
-            pageInfo.end_cursor
-        );
-    }
-
+  } catch (error) {
+    log("Browser scraping error:", error.message);
     return { success: false };
-};
-
-const getMediaUrl = async (instagramUrl) => {
-    // Command to execute yt-dlp to fetch video URL
-    const command = `./yt-dlp_linux -f b -g --cookies ./cookies.txt "${instagramUrl}"`;
-
-    try {
-        return new Promise((resolve, reject) => {
-            exec(command, (error, stdout, stderr) => {
-                if (error) {
-                    console.error(`exec error: ${error}`);
-                    return reject({ success: false, data: { mediaUrl: null } });
-                }
-
-                // If successful, stdout contains the direct video URL
-                const mediaUrl = stdout.trim(); // Trim whitespace, if any
-                resolve({
-                    success: true,
-                    data: {
-                        mediaUrl,
-                        mediaType: MEDIA_TYPE.VIDEO,
-                    },
-                });
-            });
-        });
-    } catch (error) {
-        log("failed in exec command: ", error);
-        return { success: false, data: { mediaUrl: null } };
+  } finally {
+    if (page) {
+      await page.close();
+      log("Page closed");
     }
+  }
 };
 
-const scrapWithFastDl = async (requestUrl) => {
-    let page;
-    const finalResponse = {
-        data: {},
-        success: false,
-    };
+// Main function to download content
+const scrapWithFastDl = async (url) => {
+  // Try browser-based scraping
+  log("Attempting browser scraping");
+  const result = await scrapWithBrowser(url);
 
-    try {
-        page = await Browser.getPage();
-
-        if (requestUrl.includes("/stories/")) {
-            await page.goto("https://fastdl.app/story-saver");
-        } else {
-            await page.goto("https://fastdl.app/en");
-        }
-        console.log("browser Went to fastdl");
-
-        // Wait for the input field to be ready and type the URL
-        await page.waitForSelector("#search-form-input");
-        await page.type("#search-form-input", requestUrl, { delay: 10 });
-        console.log("Typed URL into input field");
-
-        // Click the button with class search-form__button, type submit
-        await page.evaluate(() => {
-            const downloadButton = document.querySelector(
-                '.search-form__button[type="submit"]'
-            );
-            if (downloadButton) {
-                downloadButton.click();
-            }
-        });
-
-        try {
-            const captionElement = await page.waitForSelector(
-                ".output-list__caption",
-                { timeout: 9000 }
-            );
-
-            if (captionElement) {
-                const captionText = await page.evaluate(
-                    (element) => element.textContent,
-                    captionElement
-                );
-                finalResponse.data.caption = captionText.trim();
-            }
-        } catch (error) {
-            log("failed to scrap caption | request url: ", requestUrl);
-        }
-
-        try {
-            // Wait for the <ul> element to be present
-            const ulElement = await page.waitForSelector(".output-list__list", {
-                timeout: 5000,
-            });
-
-            if (ulElement) {
-                // Evaluate in the context of the page to extract information from each <li> item
-                const mediaList = await page.evaluate((ul) => {
-                    const itemList = [];
-                    // Select all <li> elements under the <ul>
-                    const liElements =
-                        ul.querySelectorAll(".output-list__item");
-
-                    // Loop through each <li> element
-                    liElements.forEach((li) => {
-                        // Extract mediaUrl from <a> tag
-                        const aTag = li.querySelector("a");
-                        const mediaUrl = aTag ? aTag.href : "";
-
-                        // Extract displayUrl from <img> tag
-                        const imgTag = li.querySelector("img");
-                        const displayUrl = imgTag ? imgTag.src : "";
-
-                        // Extract mediaType from <span> tag
-                        const spanTag = li.querySelector("span");
-                        const classString = spanTag ? spanTag.className : "";
-
-                        // Push the extracted data into itemList
-                        itemList.push({ mediaUrl, displayUrl, classString });
-                    });
-
-                    return itemList;
-                }, ulElement);
-
-                // for (let i = 0; i < mediaList.length; i++) {
-                //     console.log(mediaList[i]);
-                // }
-
-                let firstItem = {};
-                if (mediaList.length > 1) {
-                    finalResponse.data.mediaType = MEDIA_TYPE.MEDIA_GROUP;
-                    firstItem = mediaList[0];
-
-                    for (let i = 0; i < mediaList.length; i++) {
-                        if (mediaList[i].classString.includes("video")) {
-                            mediaList[i].mediaType = MEDIA_TYPE.VIDEO;
-                        } else {
-                            mediaList[i].mediaType = MEDIA_TYPE.IMAGE;
-                        }
-                    }
-                } else if (mediaList.length === 1) {
-                    firstItem = mediaList.shift();
-
-                    if (firstItem.classString.includes("video")) {
-                        finalResponse.data.mediaType = MEDIA_TYPE.VIDEO;
-                    } else {
-                        finalResponse.data.mediaType = MEDIA_TYPE.IMAGE;
-                    }
-                }
-                finalResponse.data.mediaUrl = firstItem.mediaUrl;
-                finalResponse.data.displayUrl = firstItem.displayUrl;
-                finalResponse.data.mediaList = mediaList;
-                finalResponse.success = true;
-            } else {
-                console.error("UL element not found");
-            }
-        } catch (error) {
-            console.error("Error scraping items:", error);
-        }
-    } catch (error) {
-        console.error("Error in scraping:", error);
-    } finally {
-        if (page) {
-            await Browser.releasePage(page);
-            log("Page closed/released after scraping");
-        }
+  // Validate the result more thoroughly
+  if (result.success && result.data) {
+    // Check that we have actual media URLs or buffers
+    if (result.data.mediaUrl || result.data.mediaBuffer) {
+      log("Media URL or buffer found");
+      return result;
+    } else {
+      log("No valid media URL or buffer in the result");
+      return { success: false };
     }
+  }
 
-    return finalResponse;
+  log("Browser scraping failed");
+  return { success: false };
 };
 
-module.exports = {
-    fetchOwnerId,
-    fetchTimelineData,
-    getStreamDataRecursively,
-    getMediaUrl,
-    scrapWithFastDl,
-};
+module.exports = { scrapWithFastDl };
