@@ -2,14 +2,14 @@ require("dotenv").config();
 const express = require("express");
 const app = express();
 const { Bot, Browser } = require("./config");
-const { connectDB } = require("./config/database");
 const { initQueue, requestQueue } = require("./queue");
 const { log } = require("./utils");
-const ContentRequest = require("./models/ContentRequest");
-const { MESSSAGE } = require("./constants");
 const { sendMessage } = require("./telegramActions");
 const { isValidInstaUrl } = require("./utils/helper");
 const { addOrUpdateUser } = require("./utils/addOrUpdateUser");
+const { REQUEST_STATUS } = require("./constants");
+const ContentRequest = require("./models/ContentRequest"); // Import ContentRequest
+const { MESSAGE } = require("./constants"); // Import MESSAGE
 
 // Set the server to listen on port 6060
 const PORT = process.env.PORT || 6060;
@@ -19,7 +19,7 @@ Bot.onText(/^\/start/, async (msg, match) => {
     const chatId = msg.chat.id;
     const userName = msg?.from?.username || "";
     const firstName = msg.from.first_name;
-    let welcomeMessage = MESSSAGE.WELCOME.replace(
+    let welcomeMessage = MESSAGE.WELCOME.replace(
         "firstName",
         msg.from.first_name
     );
@@ -54,8 +54,9 @@ Bot.onText(/^https:\/\/www\.instagram\.com(.+)/, async (msg, match) => {
         }
         
         try {
-            // Save the request to the database
-            const newRequest = await ContentRequest.create({
+            // Save the request to the JSON database
+            const newRequest = {
+                id: Date.now().toString(),
                 chatId,
                 requestUrl,
                 shortCode: urlResponse.shortCode,
@@ -63,8 +64,12 @@ Bot.onText(/^https:\/\/www\.instagram\.com(.+)/, async (msg, match) => {
                 requestedBy_firstName: firstName,
                 messageId: messageId,
                 requestedAt: new Date(),
-                updatedAt: new Date()
-            });
+                updatedAt: new Date(),
+                status: REQUEST_STATUS.PENDING,
+                retryCount: 0
+            };
+
+            await ContentRequest.create(newRequest);
 
             // Add the job to the queue directly
             requestQueue.add({
@@ -131,9 +136,6 @@ if (require.main === module) {
         log(`Insta saver running at http://localhost:${PORT}`);
 
         try {
-            // Connect to SQLite Database
-            await connectDB();
-
             // Open Browser
             await Browser.Open();
 
