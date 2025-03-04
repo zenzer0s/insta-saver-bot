@@ -8,6 +8,27 @@ const {
 } = require("./constants");
 const { log, logMessage, logError } = require("./utils");
 
+// Format caption to proper length and format
+const formatCaption = (caption, ownerName) => {
+  if (!caption) return '';
+  
+  // Telegram has a limit of 1024 characters for captions
+  const maxLength = 1000; 
+  
+  // Add credit line
+  const creditLine = ownerName ? `\n\nCredit: @${ownerName}` : '';
+  
+  // Format caption
+  let formattedCaption = caption.trim();
+  
+  // If caption is too long, trim it and add ellipsis
+  if (formattedCaption.length + creditLine.length > maxLength) {
+    formattedCaption = formattedCaption.substring(0, maxLength - creditLine.length - 3) + '...';
+  }
+  
+  return formattedCaption + creditLine;
+};
+
 // Send typing action to indicate user activity
 const sendChatAction = async (context) => {
     const { chatId, messageId, requestedBy, requestUrl, message } = context;
@@ -225,11 +246,20 @@ const sendRequestedData = async (data) => {
         messageId,
         requestedBy,
         requestUrl,
-        caption,
+        captionText,
         mediaUrl,
         mediaType,
+        mediaBuffer, // Add this field to handle media buffers
         mediaList,
+        owner_userName
     } = data;
+
+    log(`Sending requested data to chat ${chatId}:`);
+    log(`- Media type: ${mediaType}`);
+    log(`- Media URL: ${mediaUrl ? mediaUrl.substring(0, 50) + "..." : "None"}`);
+    
+    // Format the caption properly
+    const caption = formatCaption(captionText, owner_userName);
 
     const messagesToDelete = [];
 
@@ -238,76 +268,113 @@ const sendRequestedData = async (data) => {
         messageId,
         requestedBy,
         requestUrl,
-        message: caption,
+        caption, // Use the formatted caption
+        mediaUrl
     };
 
     // Send typing action if chatId is present
     if (chatId) {
-        await sendChatAction(userContext);
+        await sendChatAction({
+            chatId,
+            messageId,
+            requestedBy,
+            requestUrl,
+            action: "typing",
+        });
     }
 
-    // Send initiating upload message
-    const uploadingMessage = await sendMessage({
-        ...userContext,
-        message: MESSSAGE.INITIATING_UPLOAD,
-    });
-
-    // Add message to delete after processing
-    if (uploadingMessage) {
-        messagesToDelete.push(uploadingMessage?.message_id);
+    // Check if we have a valid media URL or buffer
+    if (!mediaUrl && !mediaBuffer) {
+        log("No valid media URL or buffer to send");
+        await sendMessage({
+            chatId,
+            requestedBy,
+            message: "Sorry, I couldn't extract media from this post."
+        });
+        return;
     }
 
-    const uploadContent = async (userContext) => {
-        // Determine type of media to send based on mediaType
-        if (mediaType === MEDIA_TYPE.MEDIA_GROUP) {
-            // Prepare media group array to send
-            const mediaGroupUrls = [];
-            for (let i = 0; i < mediaList?.length; i++) {
-                let mediaItem = mediaList[i];
-                if (mediaItem.mediaType === MEDIA_TYPE.IMAGE) {
-                    mediaGroupUrls.push({
-                        type: "photo",
-                        media: mediaItem.mediaUrl,
+    // Continue with existing code for sending media
+    try {
+        if (mediaType === MEDIA_TYPE.VIDEO) {
+            if (mediaBuffer) {
+                await Bot.sendVideo(chatId, mediaBuffer, { caption });
+                log("Video buffer sent successfully");
+            } else {
+                await sendVideo(userContext);
+                log("Video sent successfully");
+            }
+        } else if (mediaType === MEDIA_TYPE.IMAGE) {
+            await sendPhoto(userContext);
+            log("Photo sent successfully");
+        } else if (mediaType === MEDIA_TYPE.CAROUSEL_ALBUM) {
+            // Handle carousel items
+            if (mediaList && mediaList.length > 0) {
+                const mediaGroupUrls = [];
+                
+                // Process carousel items
+                for (let i = 0; i < Math.min(mediaList.length, 10); i++) {
+                    const item = mediaList[i];
+                    if (item.url) {
+                        // Determine media type from URL
+                        if (item.url.includes('.mp4')) {
+                            mediaGroupUrls.push({
+                                type: 'video',
+                                media: item.url,
+                                caption: i === 0 ? caption : ''
+                            });
+                        } else {
+                            mediaGroupUrls.push({
+                                type: 'photo',
+                                media: item.url,
+                                caption: i === 0 ? caption : ''
+                            });
+                        }
+                    }
+                }
+
+                if (mediaGroupUrls.length > 0) {
+                    await sendMediaGroup({
+                        ...userContext,
+                        mediaGroupUrls,
+                        caption
                     });
-                } else if (mediaItem.mediaType === MEDIA_TYPE.VIDEO) {
-                    mediaGroupUrls.push({
-                        type: "video",
-                        media: mediaItem.mediaUrl,
+                    log(`Media group with ${mediaGroupUrls.length} items sent successfully`);
+                } else {
+                    log("No valid media URLs in carousel");
+                    await sendMessage({
+                        chatId,
+                        requestedBy,
+                        message: "Sorry, I couldn't extract media from this carousel post."
                     });
                 }
+            } else {
+                log("No media list found for carousel");
+                await sendMessage({
+                    chatId,
+                    requestedBy,
+                    message: "Sorry, I couldn't extract media items from this carousel post."
+                });
             }
-
-            await sendChatAction({ ...userContext, action: "typing" });
-            // Send media group to chat
-            await sendMediaGroup({
-                ...userContext,
-                mediaGroupUrls,
-                caption: caption,
-            });
-        } else if (mediaType === MEDIA_TYPE.VIDEO) {
-            await sendChatAction({ ...userContext, action: "upload_video" });
-            // Send single video to chat
-            await sendVideo({ ...userContext, mediaUrl, caption: caption });
-        } else if (mediaType === MEDIA_TYPE.IMAGE) {
-            await sendChatAction({ ...userContext, action: "upload_photo" });
-            // Send single photo to chat
-            await sendPhoto({ ...userContext, mediaUrl, caption: caption });
         }
+    } catch (error) {
+        log("Error sending media to telegram:", error.message);
+        await sendMessage({
+            chatId,
+            requestedBy,
+            message: "Sorry, I had trouble sending the media. Instagram might be restricting access."
+        });
+    }
 
-        // If caption exists, send typing action and then send caption
-        // if (caption) {
-        //     await sendChatAction(userContext);
-        //     await sendMessage({ ...userContext, message: caption });
-        // }
-    };
-
-    await uploadContent(userContext);
-
-    // Delete messages after processing
-    await deleteMessages({ ...userContext, messagesToDelete });
-
-    // Dump media in local group
-    // await uploadContent({ ...userContext, chatId: "-1002207692130" });
+    // Clean up messages
+    if (messagesToDelete.length > 0) {
+        await deleteMessages({
+            chatId,
+            messagesToDelete,
+            requestedBy,
+            requestUrl,
+        });
+    }
 };
 
 // Export all functions for sending messages and media to a chat
