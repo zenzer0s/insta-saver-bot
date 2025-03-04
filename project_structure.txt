@@ -1,0 +1,42 @@
+.
+├── assets
+│   └── icon.png
+├── .github
+│   └── workflows
+│       └── docker-publish.yml
+├── scripts
+│   └── test.js
+├── src
+│   ├── config
+│   │   ├── browser.js
+│   │   ├── database.js
+│   │   ├── index.js
+│   │   └── telegram.js
+│   ├── models
+│   │   ├── ContentRequest.js
+│   │   ├── ContentResponse.js
+│   │   ├── Metrics.js
+│   │   └── User.js
+│   ├── utils
+│   │   ├── addOrUpdateUser.js
+│   │   ├── cleaners.js
+│   │   ├── helper.js
+│   │   ├── index.js
+│   │   └── logs.js
+│   ├── apis.js
+│   ├── constants.js
+│   ├── index.js
+│   ├── queue.js
+│   └── telegramActions.js
+├── CHANGELOG.md
+├── Dockerfile
+├── .dockerignore
+├── example.env
+├── .gitignore
+├── package.json
+├── package-lock.json
+├── project_structure.txt
+├── README.md
+└── yt-dlp_linux
+
+9 directories, 31 files
