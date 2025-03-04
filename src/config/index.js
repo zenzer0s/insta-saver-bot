@@ -1,9 +1,9 @@
-const { Bot } = require("./telegram.js");
-const Browser = require("./browser.js");
-const connectDB = require("./database.js");
+const Bot = require('./telegram');
+const Browser = require('./browser');
+const { connectDB } = require('./database');
 
 module.exports = {
     Bot,
     Browser,
-    connectDB,
+    connectDB
 };
