@@ -216,4 +216,4 @@ const initQueue = async () => {
   }
 };
 
-module.exports = { initQueue, requestQueue };
+module.exports = { initQueue, requestQueue, processJob, fetchPendingRequests };
