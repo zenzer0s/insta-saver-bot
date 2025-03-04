@@ -1,6 +1,7 @@
 const { REQUEST_STATUS } = require("./constants");
 const ContentRequest = require("./models/ContentRequest");
 const { log, waitFor } = require("./utils");
+const { Bot } = require("./config");
 const { sendRequestedData } = require("./telegramActions");
 const { scrapWithFastDl } = require("./apis");
 const Metrics = require("./models/Metrics");
@@ -32,7 +33,7 @@ class SimpleQueue {
         this.activeJobs++;
         
         // Process the job asynchronously
-        this.processJob(job).finally(() => {
+        processJob(job).finally(() => {
           this.activeJobs--;
           if (this.activeJobs === 0 && this.jobs.length === 0) {
             this.processing = false;
@@ -47,78 +48,40 @@ class SimpleQueue {
       }
     }
   }
+}
 
-  async processJob(jobData) {
-    const { id, requestUrl, retryCount } = jobData;
+async function processJob(jobData) {
+  const { id, requestUrl, retryCount, chatId } = jobData;
 
-    log(`Processing job: ${id}`);
+  log(`Processing job: ${id}`);
 
-    // Mark the job as PROCESSING in the database
-    await ContentRequest.update(
-      { 
-        status: REQUEST_STATUS.PROCESSING,
-        updatedAt: new Date()
-      },
-      { 
-        where: { id: id }
+  // Mark the job as PROCESSING in the database
+  await ContentRequest.update(
+    { 
+      status: REQUEST_STATUS.PROCESSING,
+      updatedAt: new Date()
+    },
+    { 
+      where: { id: id }
+    }
+  );
+
+  try {
+    const result = await scrapWithFastDl(requestUrl);
+
+    if (!result.success || !result.data || !result.data.mediaUrl) {
+      log(`Job ${id} failed: Unable to extract content`);
+      
+      // Try to send a message to the user
+      try {
+        await Bot.sendMessage(
+          chatId,
+          "Sorry, I couldn't download this content. Instagram might be restricting access or it could be a private post."
+        );
+      } catch (msgError) {
+        log("Error sending failure message:", msgError.message);
       }
-    );
-
-    try {
-      const result = await scrapWithFastDl(requestUrl);
-
-      if (!result.success) {
-        const newRetryCount = retryCount + 1;
-
-        if (newRetryCount <= 5) {
-          await ContentRequest.update(
-            {
-              status: REQUEST_STATUS.PENDING,
-              updatedAt: new Date(),
-              retryCount: newRetryCount
-            },
-            { where: { id: id } }
-          );
-        } else {
-          await ContentRequest.destroy({ where: { id: id } });
-          log(`Request document deleted: ${id}`);
-        }
-
-        log(`Job ${id} failed. Retry count: ${newRetryCount}`);
-        log("Scraping failed");
-      } else {
-        await waitFor(500);
-
-        // Send requested data
-        await sendRequestedData({ ...result.data, ...jobData });
-
-        // Delete document after successful processing
-        await ContentRequest.destroy({ where: { id: id } });
-        log(`Request document deleted: ${id}`);
-
-        // Find or create metrics record
-        const [metrics, created] = await Metrics.findOrCreate({
-          where: { id: '1' },
-          defaults: {
-            id: '1',
-            totalRequests: 1,
-            [`mediaProcessed_${result.data?.mediaType}`]: 1,
-            lastUpdated: new Date()
-          }
-        });
-
-        if (!created) {
-          await metrics.increment('totalRequests');
-          await metrics.increment(`mediaProcessed_${result.data?.mediaType}`);
-          metrics.lastUpdated = new Date();
-          await metrics.save();
-        }
-        
-        log(`Job ${id} completed successfully.`);
-      }
-    } catch (error) {
-      log(`Error processing job ${id}:`, error);
-
+      
       const newRetryCount = retryCount + 1;
 
       if (newRetryCount <= 5) {
@@ -130,12 +93,75 @@ class SimpleQueue {
           },
           { where: { id: id } }
         );
+        log(`Updated request ${id} for retry. Retry count: ${newRetryCount}`);
       } else {
         await ContentRequest.destroy({ where: { id: id } });
-        log(`Request document deleted: ${id}`);
+        log(`Request document deleted after max retries: ${id}`);
       }
+      
+      return;
+    }
+    
+    // If we got here, we have valid media to send
+    log(`Successfully extracted media: ${result.data.mediaType}`);
+    await waitFor(500);
 
+    // Send requested data
+    await sendRequestedData({ ...result.data, ...jobData });
+    log(`Media sent to user for job ${id}`);
+
+    // Delete document after successful processing
+    await ContentRequest.destroy({ where: { id: id } });
+    log(`Request document deleted: ${id}`);
+
+    // Update metrics
+    // Find or create metrics record
+    const [metrics, created] = await Metrics.findOrCreate({
+      where: { id: '1' },
+      defaults: {
+        id: '1',
+        totalRequests: 1,
+        [`mediaProcessed_${result.data?.mediaType}`]: 1,
+        lastUpdated: new Date()
+      }
+    });
+
+    if (!created) {
+      await metrics.increment('totalRequests');
+      await metrics.increment(`mediaProcessed_${result.data?.mediaType}`);
+      metrics.lastUpdated = new Date();
+      await metrics.save();
+    }
+    
+    log(`Job ${id} completed successfully.`);
+  } catch (error) {
+    log(`Error processing job ${id}:`, error);
+
+    // Try to send a message to the user
+    try {
+      await Bot.sendMessage(
+        chatId,
+        "Sorry, something went wrong while processing your request."
+      );
+    } catch (msgError) {
+      log("Error sending error message:", msgError.message);
+    }
+
+    const newRetryCount = retryCount + 1;
+
+    if (newRetryCount <= 5) {
+      await ContentRequest.update(
+        {
+          status: REQUEST_STATUS.PENDING,
+          updatedAt: new Date(),
+          retryCount: newRetryCount
+        },
+        { where: { id: id } }
+      );
       log(`Updated request ${id} for retry. Retry count: ${newRetryCount}`);
+    } else {
+      await ContentRequest.destroy({ where: { id: id } });
+      log(`Request document deleted after error: ${id}`);
     }
   }
 }
