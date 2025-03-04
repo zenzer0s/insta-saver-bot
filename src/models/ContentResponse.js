@@ -34,7 +34,7 @@ const ContentResponse = sequelize.define('ContentResponse', {
     type: DataTypes.STRING
   },
   captionText: {
-    type: DataTypes.TEXT
+    type: DataTypes.TEXT('long') // Use 'long' text for larger captions
   },
   displayUrl: {
     type: DataTypes.STRING
