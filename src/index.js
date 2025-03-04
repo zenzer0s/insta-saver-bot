@@ -1,9 +1,10 @@
 require("dotenv").config();
 const express = require("express");
 const app = express();
-const { Bot, connectDB, Browser } = require("./config");
-const { initQueue } = require("./queue");
-const { log, domainCleaner, extractShortCode } = require("./utils");
+const { Bot, Browser } = require("./config");
+const { connectDB } = require("./config/database");
+const { initQueue, requestQueue } = require("./queue");
+const { log } = require("./utils");
 const ContentRequest = require("./models/ContentRequest");
 const { MESSSAGE } = require("./constants");
 const { sendMessage } = require("./telegramActions");
@@ -51,17 +52,33 @@ Bot.onText(/^https:\/\/www\.instagram\.com(.+)/, async (msg, match) => {
             log("return from here as shortCode not found");
             return;
         }
-        const newRequest = new ContentRequest({
-            chatId,
-            requestUrl,
-            shortCode: urlResponse.shortCode,
-            requestedBy: { userName, firstName },
-            messageId: messageId,
-        });
-
+        
         try {
             // Save the request to the database
-            await newRequest.save();
+            const newRequest = await ContentRequest.create({
+                chatId,
+                requestUrl,
+                shortCode: urlResponse.shortCode,
+                requestedBy_userName: userName,
+                requestedBy_firstName: firstName,
+                messageId: messageId,
+                requestedAt: new Date(),
+                updatedAt: new Date()
+            });
+
+            // Add the job to the queue directly
+            requestQueue.add({
+                id: newRequest.id.toString(),
+                messageId,
+                shortCode: urlResponse.shortCode,
+                requestUrl,
+                requestedBy: {
+                    userName,
+                    firstName
+                },
+                retryCount: 0,
+                chatId
+            });
 
             await addOrUpdateUser(chatId, userName, firstName);
         } catch (error) {
@@ -70,30 +87,7 @@ Bot.onText(/^https:\/\/www\.instagram\.com(.+)/, async (msg, match) => {
     }
 });
 
-// Check for Master Backend configuration [OPTIONAL]
-// Check if the module is being run directly
-if (require.main === module) {
-    app.listen(PORT, async () => {
-        log(`Insta saver running at http://localhost:${PORT}`);
-
-        try {
-            // Connect to MongoDB
-            await connectDB();
-
-            // Open Browser
-            await Browser.Open();
-
-            // Initialize the job queue
-            await initQueue();
-        } catch (error) {
-            log("Error during startup:", error);
-        }
-    });
-} else {
-    // Export the app instance for importing
-    module.exports = app;
-}
-
+// Express routes
 app.get("/", (req, res) => {
     res.json({ message: "Welcome to Insta Saver Bot" });
 });
@@ -102,9 +96,58 @@ app.get("/test", (req, res) => {
     res.json({ message: "Bot is Online!!" });
 });
 
-// Handle shutdown gracefully
-process.on("SIGINT", async () => {
-    // Open Browser
-    await Browser.Close();
-    process.exit(0);
-});
+// Check if the module is being run directly
+if (require.main === module) {
+    let server;
+    
+    // Handle shutdown gracefully
+    const gracefulShutdown = async () => {
+        log("Shutting down gracefully...");
+        // Stop the bot polling first to prevent new requests
+        if (Bot.isPolling()) {
+            log("Stopping bot polling...");
+            await Bot.stopPolling();
+        }
+        
+        // Close Browser
+        await Browser.Close();
+        
+        // Close the server if it exists
+        if (server) {
+            log("Closing HTTP server...");
+            server.close();
+        }
+        
+        log("Shutdown complete");
+        process.exit(0);
+    };
+
+    // Process termination signals
+    process.on("SIGINT", gracefulShutdown);
+    process.on("SIGTERM", gracefulShutdown);
+    
+    // Start the server
+    server = app.listen(PORT, async () => {
+        log(`Insta saver running at http://localhost:${PORT}`);
+
+        try {
+            // Connect to SQLite Database
+            await connectDB();
+
+            // Open Browser
+            await Browser.Open();
+
+            // Initialize the job queue
+            await initQueue();
+            
+            log("Bot is ready to receive messages!");
+        } catch (error) {
+            log("Error during startup:", error);
+            // Exit with error code if startup fails
+            process.exit(1);
+        }
+    });
+} else {
+    // Export the app instance for importing
+    module.exports = app;
+}
